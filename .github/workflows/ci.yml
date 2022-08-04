@@ -1,0 +1,67 @@
+name: ci
+
+on:
+  push:
+    tags:
+      - '*'
+
+env:
+  TARGET_ACCOUNT_ID: ${{ secrets.DEVOPS_ACCOUNT_ID }}
+  ORGANIZATION_ID: ${{ secrets.ORGANIZATION_ID }}
+  AWS_REGION: us-east-1
+  STACK_NAME: minecraft-overviewer-renderer-repository
+  CHANGE_SET_NAME: release-${GITHUB_RUN_NUMBER}-${GITHUB_RUN_ATTEMPT}
+  CHANGE_SET_DESCRIPTION: ${{ github.event.head_commit.message }}
+  REPOSITORY_NAME: minecraft-overviewer-renderer
+
+permissions:
+  id-token: write
+  contents: write
+  packages: read
+
+jobs:
+  deploy_infra:
+    runs-on: ubuntu-latest
+    container: ghcr.io/mbarneyjr/ci-docker-image:latest
+    steps:
+      - uses: actions/checkout@v3
+      - name: Assume role
+        uses: aws-actions/configure-aws-credentials@v1-node16
+        with:
+          aws-region: us-east-1
+          role-to-assume: arn:aws:iam::${{ env.TARGET_ACCOUNT_ID }}:role/github-actions
+          role-session-name: GitHubActions-${{ github.run_id }}
+      - id: create_change_set
+        name: Create Change Set
+        run: |
+          make create-change-set
+          export CHANGE_SET_STATUS_REASON="$(cat artifacts/${STACK_NAME}-${CHANGE_SET_NAME}.json | jq -r .StatusReason)"
+          if [[ "$CHANGE_SET_STATUS_REASON" == "The submitted information didn't contain changes. Submit different information to create a change set." ]];
+          then
+            echo "no_changes=true" >> $GITHUB_OUTPUT
+          fi;
+      - name: Execute Change Set
+        if: ${{ steps.create_change_set.outputs.no_changes != 'true' }}
+        run: |
+          make deploy-change-set
+  deploy_image:
+    needs: deploy_infra
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+      - name: Assume role
+        uses: aws-actions/configure-aws-credentials@v1-node16
+        with:
+          aws-region: us-east-1
+          role-to-assume: arn:aws:iam::${{ env.TARGET_ACCOUNT_ID }}:role/github-actions
+          role-session-name: GitHubActions-${{ github.run_id }}
+      - name: Login to Amazon ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v1
+      - name: Build, tag, and push image to Amazon ECR
+        env:
+          ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+          IMAGE_TAG: ${{ github.ref_name }}
+        run: |
+          docker build -t $ECR_REGISTRY/$REPOSITORY_NAME:$IMAGE_TAG .
+          docker push $ECR_REGISTRY/$REPOSITORY_NAME:$IMAGE_TAG

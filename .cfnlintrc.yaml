@@ -1,0 +1,8 @@
+templates:
+  - template.yml
+include_checks:
+  - I
+ignore_checks:
+  - I3011
+  - I3042
+  - W3002
